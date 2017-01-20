@@ -1,0 +1,179 @@
+diff --git a/asmcomp/asmgen.ml b/asmcomp/asmgen.ml
+index b365e41..4f31263 100644
+--- a/asmcomp/asmgen.ml
++++ b/asmcomp/asmgen.ml
+@@ -40,6 +40,16 @@ let pass_dump_linear_if ppf flag message phrase =
+   if !flag then fprintf ppf "*** %s@.%a@." message Printlinear.fundecl phrase;
+   phrase
+ 
++let marshal_linear_to = ref None
++
++let pass_marshal_linear_if flag linear =
++  if flag then begin
++    match !marshal_linear_to with
++    | None -> ()
++    | Some chan -> Marshal.to_channel chan linear []
++  end;
++  linear
++
+ let flambda_raw_clambda_dump_if ppf
+       ({ Flambda_to_clambda. expr = ulambda; preallocated_blocks = _;
+         structured_constants; exported = _; } as input) =
+@@ -118,6 +128,7 @@ let compile_fundecl (ppf : formatter) fd_cmm =
+   ++ pass_dump_linear_if ppf dump_linear "Linearized code"
+   ++ Timings.(accumulate_time (Scheduling build)) Scheduling.fundecl
+   ++ pass_dump_linear_if ppf dump_scheduling "After instruction scheduling"
++  ++ pass_marshal_linear_if !marshal_linear
+   ++ Timings.(accumulate_time (Emit build)) Emit.fundecl
+ 
+ let compile_phrase ppf p =
+@@ -137,10 +148,20 @@ let compile_genfuns ppf f =
+        | _ -> ())
+     (Cmmgen.generic_functions true [Compilenv.current_unit_infos ()])
+ 
+-let compile_unit ~source_provenance _output_prefix asm_filename keep_asm
++let compile_unit ~source_provenance output_prefix asm_filename keep_asm
+       obj_filename gen =
+   let create_asm = keep_asm || not !Emitaux.binary_backend_available in
+   Emitaux.create_asm_file := create_asm;
++  if !Clflags.marshal_linear then begin
++    marshal_linear_to := Some (open_out (output_prefix ^ ".linear"))
++  end;
++  let close_marshal_linear () =
++    match !marshal_linear_to with
++    | None -> ()
++    | Some chan ->
++      close_out chan;
++      marshal_linear_to := None
++  in
+   try
+     if create_asm then Emitaux.output_channel := open_out asm_filename;
+     begin try
+@@ -157,9 +178,11 @@ let compile_unit ~source_provenance _output_prefix asm_filename keep_asm
+     in
+     if assemble_result <> 0
+     then raise(Error(Assembler_error asm_filename));
+-    if create_asm && not keep_asm then remove_file asm_filename
++    if create_asm && not keep_asm then remove_file asm_filename;
++    close_marshal_linear ()
+   with exn ->
+     remove_file obj_filename;
++    close_marshal_linear ();
+     raise exn
+ 
+ let set_export_info (ulambda, prealloc, structured_constants, export) =
+diff --git a/driver/main_args.ml b/driver/main_args.ml
+index ea89daf..91945fe 100644
+--- a/driver/main_args.ml
++++ b/driver/main_args.ml
+@@ -417,6 +417,10 @@ let mk_S f =
+   "-S", Arg.Unit f, " Keep intermediate assembly file"
+ ;;
+ 
++let mk_Sl f =
++  "-Sl", Arg.Unit f, " Marshal linearized code to `.linear' file"
++;;
++
+ let mk_safe_string f =
+   "-safe-string", Arg.Unit f, " Make strings immutable"
+ ;;
+@@ -871,6 +875,7 @@ module type Optcomp_options = sig
+   val _p : unit -> unit
+   val _pp : string -> unit
+   val _S : unit -> unit
++  val _Sl : unit -> unit
+   val _shared : unit -> unit
+ end;;
+ 
+@@ -882,6 +887,7 @@ module type Opttop_options = sig
+   val _noprompt : unit -> unit
+   val _nopromptcont : unit -> unit
+   val _S : unit -> unit
++  val _Sl : unit -> unit
+   val _stdin : unit -> unit
+ end;;
+ 
+@@ -1118,6 +1124,7 @@ struct
+     mk_rounds F._rounds;
+     mk_runtime_variant F._runtime_variant;
+     mk_S F._S;
++    mk_Sl F._Sl;
+     mk_safe_string F._safe_string;
+     mk_shared F._shared;
+     mk_short_paths F._short_paths;
+@@ -1216,6 +1223,7 @@ module Make_opttop_options (F : Opttop_options) = struct
+     mk_no_rectypes F._no_rectypes;
+     mk_remove_unused_arguments F._remove_unused_arguments;
+     mk_S F._S;
++    mk_Sl F._Sl;
+     mk_safe_string F._safe_string;
+     mk_short_paths F._short_paths;
+     mk_stdin F._stdin;
+diff --git a/driver/main_args.mli b/driver/main_args.mli
+index 49de50d..142d973 100644
+--- a/driver/main_args.mli
++++ b/driver/main_args.mli
+@@ -186,6 +186,7 @@ module type Optcomp_options = sig
+   val _p : unit -> unit
+   val _pp : string -> unit
+   val _S : unit -> unit
++  val _Sl : unit -> unit
+   val _shared : unit -> unit
+ end;;
+ 
+@@ -197,6 +198,7 @@ module type Opttop_options = sig
+   val _noprompt : unit -> unit
+   val _nopromptcont : unit -> unit
+   val _S : unit -> unit
++  val _Sl : unit -> unit
+   val _stdin : unit -> unit
+ end;;
+ 
+diff --git a/driver/optmain.ml b/driver/optmain.ml
+index 8d1d3dd..48495e7 100644
+--- a/driver/optmain.ml
++++ b/driver/optmain.ml
+@@ -211,6 +211,7 @@ module Options = Main_args.Make_optcomp_options (struct
+   let _no_strict_formats = clear strict_formats
+   let _shared () = shared := true; dlcode := true
+   let _S = set keep_asm_file
++  let _Sl = set marshal_linear
+   let _thread = set use_threads
+   let _unbox_closures = set unbox_closures
+   let _unbox_closures_factor f = unbox_closures_factor := f
+diff --git a/tools/ocamloptp.ml b/tools/ocamloptp.ml
+index b96d283..a06b833 100644
+--- a/tools/ocamloptp.ml
++++ b/tools/ocamloptp.ml
+@@ -117,6 +117,7 @@ module Options = Main_args.Make_optcomp_options (struct
+   let _remove_unused_arguments = option "-remove-unused-arguments"
+   let _runtime_variant s = option_with_arg "-runtime-variant" s
+   let _S = option "-S"
++  let _Sl = option "-Sl"
+   let _safe_string = option "-safe-string"
+   let _short_paths = option "-short-paths"
+   let _strict_sequence = option "-strict-sequence"
+diff --git a/utils/clflags.ml b/utils/clflags.ml
+index b8ce959..895e176 100644
+--- a/utils/clflags.ml
++++ b/utils/clflags.ml
+@@ -104,6 +104,7 @@ and dump_flambda_verbose = ref false    (* -dflambda-verbose *)
+ and dump_instr = ref false              (* -dinstr *)
+ 
+ let keep_asm_file = ref false           (* -S *)
++let marshal_linear = ref false          (* -Sl *)
+ let optimize_for_speed = ref true       (* -compact *)
+ and opaque = ref false                  (* -opaque *)
+ 
+diff --git a/utils/clflags.mli b/utils/clflags.mli
+index a5c9ec9..eec8177 100644
+--- a/utils/clflags.mli
++++ b/utils/clflags.mli
+@@ -127,6 +127,7 @@ val dump_flambda : bool ref
+ val dump_flambda_let : int option ref
+ val dump_instr : bool ref
+ val keep_asm_file : bool ref
++val marshal_linear : bool ref
+ val optimize_for_speed : bool ref
+ val dump_cmm : bool ref
+ val dump_selection : bool ref

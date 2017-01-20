@@ -1,0 +1,3 @@
+From inside a built compiler's source tree:
+
+ocamlopt.opt -I bytecomp -I asmcomp -I utils compilerlibs/ocamloptcomp.cmxa compilerlibs/ocamlbytecomp.cmxa compilerlibs/ocamlcommon.cmxa -o object_stats object_stats.ml
