@@ -79,8 +79,15 @@ let analyse ~(fundecl : Linearize.fundecl) =
       | Iconst_float _
       | Iconst_symbol _
       | Iconst_blockheader _
-      | Istackoffset _ | Iload _ | Istore _
-      | Iintop _ | Iintop_imm _ | Inegf | Iabsf | Iaddf | Isubf | Imulf | Idivf
+      | Istackoffset _ | Iload _ | Istore _ -> ()
+      | Iintop op | Iintop_imm (op, _) ->
+        begin match op with
+        | Iadd | Isub | Imul | Imulh | Idiv | Imod
+        | Iand | Ior | Ixor | Ilsl | Ilsr | Iasr
+        | Icomp _ -> ()
+        | Icheckbound -> stats.may_raise <- true
+        end
+      | Inegf | Iabsf | Iaddf | Isubf | Imulf | Idivf
       | Ifloatofint | Iintoffloat -> ()
       | Ispecific _ ->
         (* For x86-64, these don't raise, allocate or call. *)
